@@ -16,9 +16,9 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
 
 # Regex that matches most URLs / t.me links
 LINK_PATTERN = re.compile(
-    r"https?://"                  # http:// or https://
+    r"(?:https?://"              # http:// or https://
     r"|t\.me/"                   # telegram short links
-    r"|(?:www\.)",               # www.
+    r"|(?:www\.))",              # www.
     re.IGNORECASE,
 )
 
@@ -69,8 +69,11 @@ async def filter_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await is_admin_or_owner(context, chat, user_id):
             return  # admin/owner — allowed
     except Exception as e:
-        logger.warning("Could not check member status: %s", e)
-        return  # if check fails, don't delete
+        logger.warning(
+            "Could not check member status for %s in %s (%s): %s — attempting deletion",
+            user_id, chat.id, chat.title, e,
+        )
+        # Fall through to attempt deletion — treat unknown users as non-admin.
 
     # ── Delete the message ──
     try:
@@ -82,7 +85,11 @@ async def filter_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat.title,
         )
     except Exception as e:
-        logger.error("Failed to delete message: %s", e)
+        logger.error(
+            "Failed to delete message from %s in %s (%s): %s — "
+            "make sure the bot is an admin with 'Delete Messages' permission",
+            user_id, chat.id, chat.title, e,
+        )
 
 
 # ─── Main ────────────────────────────────────────────────────────

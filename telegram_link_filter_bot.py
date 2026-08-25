@@ -16,9 +16,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
 
 # Regex that matches most URLs / t.me links
 LINK_PATTERN = re.compile(
-    r"(?:https?://"              # http:// or https://
-    r"|t\.me/"                   # telegram short links
-    r"|(?:www\.))",              # www.
+    r"(?:"
+    r"https?://"           # http:// or https://
+    r"|t\.me/"             # telegram short links
+    r"|www\."              # www.
+    r")",
     re.IGNORECASE,
 )
 
@@ -33,20 +35,46 @@ logger = logging.getLogger(__name__)
 async def is_admin_or_owner(context: ContextTypes.DEFAULT_TYPE, chat, user_id: int) -> bool:
     """Return True if user is admin or owner of the chat."""
     member = await context.bot.get_chat_member(chat_id=chat.id, user_id=user_id)
+    logger.info("User %s status in chat %s: %s", user_id, chat.id, member.status)
     return member.status in ("administrator", "creator")
 
 
 # ─── Message handler ─────────────────────────────────────────────
 async def filter_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle both regular messages and channel posts
     message = update.effective_message
     if message is None:
+        logger.debug("No effective_message in update %s", update.update_id)
         return
 
     chat = message.chat
-    user_id = message.from_user.id if message.from_user else None
+    user = message.from_user
+    sender_chat = message.sender_chat  # For anonymous admins / channel posts
 
-    # Skip if no user (e.g. anonymous admin) or no text / caption
-    if user_id is None:
+    logger.info(
+        "📩 Message received in '%s' (id=%s, type=%s) from user=%s sender_chat=%s: %s",
+        chat.title, chat.id, chat.type,
+        user.id if user else "None",
+        sender_chat.id if sender_chat else "None",
+        (message.text or message.caption or "")[:100],
+    )
+
+    # If message is from a channel (sender_chat is the channel itself),
+    # skip deletion — this is how admins post in linked groups
+    if sender_chat and sender_chat.id == chat.id:
+        logger.info("Message from the channel/group itself (sender_chat == chat), skipping.")
+        return
+
+    # If sent by a channel linked to this group, check if it's the owner channel
+    if sender_chat and not user:
+        logger.info("Anonymous sender_chat %s (%s) — attempting deletion.",
+                     sender_chat.id, sender_chat.title)
+        # Anonymous sender — can't check admin status, so check for links and delete
+        user_id = None
+    elif user:
+        user_id = user.id
+    else:
+        logger.info("No user and no sender_chat, skipping.")
         return
 
     text = message.text or message.caption or ""
@@ -60,33 +88,41 @@ async def filter_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif ent.type == "url" and message.caption:
             text += " " + message.caption[ent.offset : ent.offset + ent.length]
 
+    logger.info("Extracted text for link check: %s", text[:200])
+
     # ── Check 1: does the message contain a link? ──
     if not LINK_PATTERN.search(text):
+        logger.info("No link found in message, allowing.")
         return  # no link found, let it stay
 
+    logger.info("⚠️ Link detected in message!")
+
     # ── Check 2: is the sender an admin / owner? ──
-    try:
-        if await is_admin_or_owner(context, chat, user_id):
-            return  # admin/owner — allowed
-    except Exception as e:
-        logger.warning(
-            "Could not check member status for %s in %s (%s): %s — attempting deletion",
-            user_id, chat.id, chat.title, e,
-        )
-        # Fall through to attempt deletion — treat unknown users as non-admin.
+    if user_id is not None:
+        try:
+            if await is_admin_or_owner(context, chat, user_id):
+                logger.info("User %s is admin/owner, allowing link.", user_id)
+                return  # admin/owner — allowed
+            logger.info("User %s is NOT admin/owner, will delete.", user_id)
+        except Exception as e:
+            logger.warning(
+                "Could not check member status for %s in %s (%s): %s — attempting deletion",
+                user_id, chat.id, chat.title, e,
+            )
+            # Fall through to attempt deletion — treat unknown users as non-admin.
+    else:
+        logger.info("No user_id (anonymous), will attempt deletion.")
 
     # ── Delete the message ──
     try:
         await message.delete()
         logger.info(
-            "Deleted link message from user %s in chat %s (%s)",
-            user_id,
-            chat.id,
-            chat.title,
+            "✅ DELETED link message from user %s in chat %s (%s)",
+            user_id, chat.id, chat.title,
         )
     except Exception as e:
         logger.error(
-            "Failed to delete message from %s in %s (%s): %s — "
+            "❌ Failed to delete message from %s in %s (%s): %s — "
             "make sure the bot is an admin with 'Delete Messages' permission",
             user_id, chat.id, chat.title, e,
         )
@@ -103,15 +139,22 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Listen for any new text/photo/document/video message in groups/channels
-    # Caption filtering is handled inside filter_links via message.caption
+    # Filter for content types we want to check
+    content_filter = (
+        filters.ALL
+        & ~filters.COMMAND
+        & (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.ANIMATION)
+    )
+
+    # Listen for regular messages in groups
     app.add_handler(
-        MessageHandler(
-            filters.ALL
-            & ~filters.COMMAND
-            & (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.ANIMATION),
-            filter_links,
-        )
+        MessageHandler(content_filter, filter_links)
+    )
+
+    # Also listen for channel_post (messages forwarded from linked channels)
+    app.add_handler(
+        MessageHandler(content_filter, filter_links),
+        group=1,  # Different handler group
     )
 
     # ─── Health check server for Render / hosting platforms ───
@@ -130,7 +173,7 @@ def main():
     logger.info("Health check server on port %s", port)
 
     logger.info("Bot is running… Ctrl+C to stop.")
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

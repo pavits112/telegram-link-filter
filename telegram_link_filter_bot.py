@@ -1,6 +1,8 @@
 import os
 import re
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -104,6 +106,21 @@ def main():
             filter_links,
         )
     )
+
+    # ─── Health check server for Render / hosting platforms ───
+    port = int(os.environ.get("PORT", 10000))
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, format, *args):
+            pass  # silence request logs
+
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Health check server on port %s", port)
 
     logger.info("Bot is running… Ctrl+C to stop.")
     app.run_polling()

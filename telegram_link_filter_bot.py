@@ -95,11 +95,12 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Listen for any new text/photo/document/video message in groups/channels
+    # Caption filtering is handled inside filter_links via message.caption
     app.add_handler(
         MessageHandler(
             filters.ALL
             & ~filters.COMMAND
-            & (filters.TEXT | filters.Caption.ALL | filters.PHOTO | filters.Document.ALL | filters.VIDEO),
+            & (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.ANIMATION),
             filter_links,
         )
     )
